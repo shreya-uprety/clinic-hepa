@@ -1,0 +1,289 @@
+<!-- START OF FILE mic_bench.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MedForce AI - Live Mic (Robust)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .json-box { height: 250px; overflow-y: auto; background: #000; border: 1px solid #1f2937; border-radius: 0.75rem; }
+        pre { font-size: 10px; line-height: 1.2; padding: 10px; color: #10b981; tab-size: 2; }
+        ::-webkit-scrollbar { width: 4px; }
+        ::-webkit-scrollbar-thumb { background: #374151; }
+        .header-tag { font-size: 9px; font-weight: 800; letter-spacing: 0.05em; }
+        .recording-pulse { animation: pulse-red 2s infinite; }
+        @keyframes pulse-red {
+            0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.7); }
+            70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+        }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 p-4 font-sans min-h-screen">
+
+    <!-- Top Navigation -->
+    <header class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
+        <div>
+            <h1 class="text-2xl font-black text-red-500">MedForce <span class="text-white">LIVE MIC</span></h1>
+            <div class="flex items-center gap-3 mt-1">
+                <p id="systemState" class="text-gray-500 text-xs">Emulating 24kHz Simulation Stream</p>
+                <div id="micStatus" class="flex items-center gap-2 hidden">
+                    <span class="relative flex h-2 w-2">
+                        <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-red-400 opacity-75"></span>
+                        <span class="relative inline-flex rounded-full h-2 w-2 bg-red-500"></span>
+                    </span>
+                    <span class="text-[10px] font-mono text-red-500 font-bold">LIVE INPUT</span>
+                </div>
+            </div>
+        </div>
+        
+        <div class="flex gap-4 items-center">
+            <div class="flex flex-col items-end mr-4">
+                <span class="text-[9px] text-gray-500 uppercase font-bold mb-1">Target Environment</span>
+                <select id="serverSelect" class="bg-gray-900 text-xs text-blue-400 border border-gray-700 rounded px-2 py-1 outline-none focus:border-blue-500">
+                    <option value="ws://localhost:8000">Local (localhost:8000)</option>
+                    <option value="wss://clinic-hepa-v2-481780815788.europe-west1.run.app">Deployed (Google Cloud Run)</option>
+                </select>
+            </div>
+            
+            <button id="toggleMicBtn" class="bg-gray-800 border border-gray-600 hover:bg-gray-700 px-6 py-2 rounded-lg font-bold text-sm transition-all flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+                Start Mic
+            </button>
+            
+            <button onclick="location.reload()" class="bg-gray-800 hover:bg-gray-700 px-4 py-2 rounded-lg font-bold text-sm transition">Reset</button>
+        </div>
+    </header>
+
+    <!-- Visualizer Section -->
+    <main class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <section><div class="header-tag text-purple-500 mb-1 uppercase">● Chat Transcript</div><div class="json-box" id="box-chat"><pre>Waiting for speech...</pre></div></section>
+        <section><div class="header-tag text-blue-500 mb-1 uppercase">● Diagnosis Pool</div><div class="json-box" id="box-diagnosis"><pre>Waiting...</pre></div></section>
+        <section><div class="header-tag text-yellow-500 mb-1 uppercase">● Question Pool</div><div class="json-box" id="box-questions"><pre>Waiting...</pre></div></section>
+        <section><div class="header-tag text-pink-500 mb-1 uppercase">● Analytics</div><div class="json-box" id="box-analytics"><pre>Waiting...</pre></div></section>
+        <section><div class="header-tag text-emerald-500 mb-1 uppercase">● Education</div><div class="json-box" id="box-education"><pre>Waiting...</pre></div></section>
+        <section><div class="header-tag text-gray-400 mb-1 uppercase">● Status</div><div class="json-box" id="box-status"><pre>Waiting...</pre></div></section>
+        <section><div class="header-tag text-orange-500 mb-1 uppercase">● Checklist</div><div class="json-box" id="box-checklist"><pre>Waiting...</pre></div></section>
+        <section><div class="header-tag text-red-500 mb-1 uppercase">● Report</div><div class="json-box" id="box-report"><pre>Waiting...</pre></div></section>
+    </main>
+
+    <script>
+        // --- Configuration ---
+        // CRITICAL: The server expects 24,000 Hz because that is what the simulation sent.
+        // We must downsample the Mic (44.1k/48k) to 24k before sending.
+        const TARGET_SAMPLE_RATE = 24000; 
+        const startPayload = { "type": "start", "patient_id": "P0001", "gender": "Male" };
+        const relevantTypes = ["chat", "diagnosis", "questions", "analytics", "status", "education", "checklist", "report"];
+
+        // --- State ---
+        let transSocket;
+        let audioContext;
+        let mediaStream;
+        let scriptProcessor;
+        let isRecording = false;
+
+        function getServerUrl() { return document.getElementById('serverSelect').value; }
+
+        // --- UI Interactions ---
+        const toggleBtn = document.getElementById('toggleMicBtn');
+        const micStatus = document.getElementById('micStatus');
+
+        toggleBtn.onclick = async () => {
+            if (!isRecording) {
+                await startSession();
+            } else {
+                stopSession();
+            }
+        };
+
+        async function startSession() {
+            try {
+                toggleBtn.innerText = "Connecting...";
+                toggleBtn.disabled = true;
+
+                // 1. Browser Capability Check
+                if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+                    throw new Error("Browser API not supported. Are you using HTTPS or Localhost?");
+                }
+
+                // 2. Connect WebSocket
+                await connectTranscriber();
+
+                // 3. Initialize Audio
+                mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: true,
+                        noiseSuppression: true,
+                        autoGainControl: true,
+                        channelCount: 1
+                    } 
+                });
+
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                
+                // Fix for suspended audio contexts (common in Chrome)
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+
+                const source = audioContext.createMediaStreamSource(mediaStream);
+                
+                // Use a ScriptProcessor to access raw PCM data
+                // bufferSize 4096 is standard.
+                scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(audioContext.destination); // Destination is needed for Chrome to fire events
+
+                scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
+                    if (!transSocket || transSocket.readyState !== WebSocket.OPEN) return;
+
+                    const inputBuffer = audioProcessingEvent.inputBuffer;
+                    const inputData = inputBuffer.getChannelData(0); // Float32 Array
+                    const currentRate = inputBuffer.sampleRate; // e.g., 48000
+
+                    // 4. Process & Send
+                    // We must convert Float32@48k -> Int16@24k
+                    const resampledInt16 = downsampleAndConvert(inputData, currentRate, TARGET_SAMPLE_RATE);
+                    
+                    transSocket.send(resampledInt16);
+                };
+
+                // UI Updates
+                isRecording = true;
+                toggleBtn.innerText = "Stop Mic";
+                toggleBtn.disabled = false;
+                toggleBtn.classList.remove('bg-gray-800');
+                toggleBtn.classList.add('bg-red-600', 'hover:bg-red-500', 'text-white', 'recording-pulse');
+                micStatus.classList.remove('hidden');
+
+            } catch (err) {
+                console.error("Full Setup Error:", err);
+                // Try to extract a meaningful message
+                let msg = err.message || err.name || "Unknown Error (Check Console)";
+                
+                if (err.name === 'NotAllowedError') msg = "Microphone Permission Denied.";
+                if (err.name === 'NotFoundError') msg = "No Microphone Found.";
+
+                alert("Failed to start session:\n" + msg);
+                
+                toggleBtn.innerText = "Start Mic";
+                toggleBtn.disabled = false;
+                // Cleanup partial connections
+                if (transSocket) transSocket.close();
+            }
+        }
+
+        function stopSession() {
+            isRecording = false;
+            
+            // UI Updates
+            toggleBtn.innerText = "Start Mic";
+            toggleBtn.classList.add('bg-gray-800');
+            toggleBtn.classList.remove('bg-red-600', 'hover:bg-red-500', 'text-white', 'recording-pulse');
+            micStatus.classList.add('hidden');
+
+            // Cleanup Audio
+            if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
+            if (scriptProcessor) scriptProcessor.disconnect();
+            if (audioContext) audioContext.close();
+
+            // Cleanup Socket
+            if (transSocket) transSocket.close();
+        }
+
+        function connectTranscriber() {
+            return new Promise((resolve, reject) => {
+                const baseUrl = getServerUrl();
+                // Ensure correct protocol (ws:// vs wss://)
+                let socketUrl = baseUrl + "/ws/transcriber";
+                
+                console.log("Connecting to:", socketUrl);
+                transSocket = new WebSocket(socketUrl);
+                transSocket.binaryType = "arraybuffer"; // Important!
+
+                transSocket.onopen = () => {
+                    console.log("WS Connected");
+                    // Send the handshake JSON just like test_bench.html does
+                    transSocket.send(JSON.stringify(startPayload));
+                    resolve();
+                };
+
+                transSocket.onerror = (e) => {
+                    console.error("WebSocket Connection Failed", e);
+                    reject(new Error("WebSocket Connection Failed. Is the server running?"));
+                };
+
+                transSocket.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        handleServerMessage(msg);
+                    } catch (e) { 
+                        // Ignored (sometimes server might send non-json acknowledgments)
+                    }
+                };
+            });
+        }
+
+        function handleServerMessage(msg) {
+            if (relevantTypes.includes(msg.type)) {
+                const box = document.getElementById(`box-${msg.type}`);
+                if (box) {
+                    box.querySelector('pre').innerText = JSON.stringify(msg.diagnosis || msg.questions || msg.data || msg, null, 2);
+                    if (msg.type === 'chat') box.scrollTop = box.scrollHeight;
+                }
+            }
+        }
+
+        /**
+         * Converts High Sample Rate Float32 (Microphone) -> Low Sample Rate Int16 (Server)
+         */
+        function downsampleAndConvert(buffer, inputRate, outputRate) {
+            if (outputRate === inputRate) {
+                return convertFloatToInt16(buffer);
+            }
+
+            const sampleRateRatio = inputRate / outputRate;
+            const newLength = Math.round(buffer.length / sampleRateRatio);
+            const result = new Int16Array(newLength);
+            
+            let offsetResult = 0;
+            let offsetBuffer = 0;
+
+            while (offsetResult < result.length) {
+                const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+                
+                let accum = 0, count = 0;
+                for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                    accum += buffer[i];
+                    count++;
+                }
+
+                let resultSample = count > 0 ? accum / count : 0;
+                resultSample = Math.max(-1, Math.min(1, resultSample));
+                
+                // Convert to Int16
+                result[offsetResult] = resultSample < 0 ? resultSample * 0x8000 : resultSample * 0x7FFF;
+                
+                offsetResult++;
+                offsetBuffer = nextOffsetBuffer;
+            }
+            return result.buffer;
+        }
+
+        function convertFloatToInt16(buffer) {
+            const l = buffer.length;
+            const buf = new Int16Array(l);
+            for (let i = 0; i < l; i++) {
+                let s = Math.max(-1, Math.min(1, buffer[i]));
+                buf[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+            }
+            return buf.buffer;
+        }
+
+    </script>
+</body>
+</html>

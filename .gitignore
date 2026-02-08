@@ -1,0 +1,34 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+.claude/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Environment variables
+.env
+
+# Chrome or browser profiles
+chrome_profile/
+output/
+# OS junk files
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+*.tmp
+
+# Runtime-generated state files
+question_pool.json
+education_pool.json
+diagnosis_result.json
+diagnosis_consolidate.json
+ranked_questions.json
+master_question.json
+status_update.json
+simulation_transcript.txt
