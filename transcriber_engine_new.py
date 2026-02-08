@@ -19,6 +19,7 @@ import agents
 import diagnosis_manager
 import question_manager
 import education_manager
+from gcs_manager import GCSManager
 
 logger = logging.getLogger("medforce-backend")
 TRANSCRIPT_FILE = "simulation_transcript.txt"
@@ -27,26 +28,28 @@ TRANSCRIPT_FILE = "simulation_transcript.txt"
 
 # --- LOGIC THREAD ---
 class TranscriberLogicThread(threading.Thread):
-    def __init__(self, patient_info, dm, qm, main_loop, websocket, transcript_memory, run_status, audio_provider_callback):
+    def __init__(self, patient_id, patient_info, dm, qm, main_loop, websocket, transcript_memory, run_status, audio_provider_callback):
         super().__init__()
+        self.patient_id = patient_id
         self.patient_info = patient_info
         self.dm = dm
         self.qm = qm
-        self.main_loop = main_loop 
+        self.main_loop = main_loop
         self.websocket = websocket
         self.running = run_status
-        self.daemon = True 
+        self.daemon = True
         self.status = False
         self.transcript_memory = transcript_memory
-        
+
         # Callback to get full audio from Engine
-        self.get_full_audio = audio_provider_callback 
+        self.get_full_audio = audio_provider_callback
 
         # Logic Components
         self.qc = agents.QuestionCheck()
         self.em = education_manager.EducationPoolManager()
-        self.last_line_count = 0 
+        self.last_line_count = 0
         self.ready_event = threading.Event()
+        self.gcs = GCSManager()
         
         # Chat State
         self.transcript_structure = []
@@ -330,10 +333,25 @@ class TranscriberLogicThread(threading.Thread):
             logger.error(f"Check logic error: {e}")
             traceback.print_exc()
 
+    def _upload_to_gcs(self, checklist_data, report_data):
+        """Uploads all consultation data to GCS under patient_data/{patient_id}/"""
+        prefix = f"patient_data/{self.patient_id}"
+        try:
+            self.gcs.write_file(f"{prefix}/transcript.json", self.transcript_structure)
+            self.gcs.write_file(f"{prefix}/diagnosis.json", self.dm.get_diagnoses())
+            self.gcs.write_file(f"{prefix}/questions.json", self.qm.questions)
+            self.gcs.write_file(f"{prefix}/education.json", self.em.pool)
+            self.gcs.write_file(f"{prefix}/analytics.json", self.analytics_pool)
+            self.gcs.write_file(f"{prefix}/checklist.json", checklist_data)
+            self.gcs.write_file(f"{prefix}/report.json", report_data)
+            logger.info(f"Uploaded consultation data to GCS: {prefix}/")
+        except Exception as e:
+            logger.error(f"GCS upload error: {e}")
+
     async def _final_wrap(self):
         logger.info("🛑 [Finalization] Consultation complete. Generating final outputs...")
         check_result = await self.checklist_agent.generate_checklist(
-            transcript = self.transcript_structure, 
+            transcript = self.transcript_structure,
             diagnosis = self.dm.get_diagnoses(),
             question_list = self.qm.questions,
             analytics = self.analytics_pool,
@@ -352,6 +370,8 @@ class TranscriberLogicThread(threading.Thread):
         )
 
         await self._push_to_ui({"type": "report", "data": report_result})
+
+        self._upload_to_gcs(check_result, report_result)
         logger.info("🛑 [Finalization] Finished")
 
     async def _logic_loop(self):
@@ -427,12 +447,13 @@ class TranscriberEngine:
 
         # Initialize Logic Thread
         self.logic_thread = TranscriberLogicThread(
-            self.patient_info, 
-            diagnosis_manager.DiagnosisManager(), 
-            question_manager.QuestionPoolManager([]), 
-            self.main_loop, 
-            self.websocket, 
-            self.transcript_memory, 
+            self.patient_id,
+            self.patient_info,
+            diagnosis_manager.DiagnosisManager(),
+            question_manager.QuestionPoolManager([]),
+            self.main_loop,
+            self.websocket,
+            self.transcript_memory,
             self.running,
             self.get_audio_buffer_copy # <--- Pass the callback
         )
