@@ -523,9 +523,22 @@ class TranscriberEngine:
                             self.transcript_memory.append(transcript)
                         else:
                             self.transcript_memory[-1] = transcript
-                        
+
                         self.is_sentence_final = True
                         print(f"\n✅ [FINAL SENTENCE]: {transcript}")
+
+                        # Push live STT transcript to UI immediately
+                        try:
+                            live_payload = {
+                                "type": "stt_live",
+                                "transcript": list(self.transcript_memory)
+                            }
+                            asyncio.run_coroutine_threadsafe(
+                                self.websocket.send_json(live_payload),
+                                self.main_loop
+                            )
+                        except Exception:
+                            pass
 
             except Exception as e:
                 if self.running:
